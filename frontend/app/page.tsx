@@ -1,17 +1,38 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Search } from "lucide-react";
 import { ProductListSkeleton } from "@/components/ProductListSkeleton";
 import { VirtualizedProductList } from "@/components/VirtualizedProductList";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { productsUrl } from "@/lib/api";
 import type { Product } from "@/lib/types";
 
+function filterByExactTitleOrBrand(products: Product[], query: string): Product[] {
+  const q = query.trim();
+  if (!q) return products;
+  return products.filter(
+    (p) => p.name === q || p.brand === q
+  );
+}
+
+// Home page includes the list of all products in a virtualized list to allow for efficient rendering at scale (will also need pagination)
 export default function Home() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [listHeight, setListHeight] = useState(600);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState("");
 
+  const handleSearch = useCallback(() => {
+    setAppliedQuery(searchQuery);
+  }, [searchQuery]);
+
+  const filteredProducts = filterByExactTitleOrBrand(products, appliedQuery);
+
+  // Update the list height based on the window size
   useEffect(() => {
     const updateHeight = () =>
       setListHeight(Math.max(400, window.innerHeight - 240));
@@ -23,6 +44,7 @@ export default function Home() {
     };
   }, []);
 
+  // Fetch the products from the FastAPI backend API
   useEffect(() => {
     fetch(productsUrl())
       .then((res) => {
@@ -46,15 +68,47 @@ export default function Home() {
         <h1 className="mb-8 text-2xl font-semibold tracking-tight text-foreground">
           Products
         </h1>
+        <div className="relative mb-6 w-full sm:w-full lg:max-w-sm">
+          <div className="relative">
+            <Input
+              placeholder="Search products..."
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+              className="pr-10"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="absolute inset-y-0 right-0 rounded-l-none text-muted-foreground"
+              aria-label="Search"
+              onClick={handleSearch}
+            >
+              <Search className="h-4 w-4" aria-hidden />
+            </Button>
+          </div>
+        </div>
+        {/* Skeleton loading state */}
         {loading && <ProductListSkeleton />}
+        {/* Error state */}
         {error && (
           <p className="text-destructive">{error}</p>
         )}
+        {/* No products found state */}
         {!loading && !error && products.length === 0 && (
           <p className="text-muted-foreground">No products found.</p>
         )}
-        {!loading && !error && products.length > 0 && (
-          <VirtualizedProductList products={products} height={listHeight} />
+        {/* No results for search */}
+        {!loading && !error && products.length > 0 && filteredProducts.length === 0 && (
+          <p className="text-muted-foreground">
+            No products match exactly &quot;{appliedQuery}&quot; (by title or brand).
+          </p>
+        )}
+        {/* Products found state */}
+        {!loading && !error && filteredProducts.length > 0 && (
+          <VirtualizedProductList products={filteredProducts} height={listHeight} />
         )}
       </main>
     </div>

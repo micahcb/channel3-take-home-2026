@@ -39,6 +39,8 @@ def _get_client() -> AsyncOpenAI:
     return AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
 
 
+
+# Added a slight modification of the cost logging to be able to track full runs
 def _cost_from_response(response) -> float:
     """Compute cost in USD for a single response from usage and MODEL_PRICES."""
     usage = getattr(response, "usage", None)
@@ -128,15 +130,3 @@ async def responses(
         cost = _log_usage(response)
         return (response, cost)
 
-
-
-
-
-
-### Usage from given main.py 
-#     response = await ai.responses(
-#         "gpt-5-nano",
-#         [{"role": "system", "content": "You are a helpful assistant that outputs everything in reverse."},
-#          {"role": "user", "content": "Say 'hello world'"}],
-#         text_format=HelloWorldResponse)
-#     logging.info(response.message)
