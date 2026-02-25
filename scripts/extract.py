@@ -1,11 +1,13 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import TypedDict
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from bs4 import BeautifulSoup, Comment
 from langchain_core.runnables import RunnableSerializable
+from langgraph.graph import StateGraph, START, END
 from pydantic import ValidationError as PydanticValidationError
 import logging
 
@@ -28,8 +30,27 @@ router = APIRouter()
 
 EXTRACT_MODEL = "openai/gpt-5-nano"
 MAX_RETRIES = 5
+LLM_COST_LIMIT_USD = 5.0
 DATA_OUT_PATH = Path(__file__).resolve().parent.parent / "data" / "data_out.csv"
 KEY_COLUMN = "filename"
+
+
+# ---- Graph state: single context for the whole extraction flow ----
+class ExtractState(TypedDict, total=False):
+    """State for the extraction graph. Holds context and retry state."""
+    html_content: str
+    html_filtered: str
+    source_filename: str | None
+    category: models.Category | None
+    category_retry_error: str | None
+    category_attempt: int
+    product: models.Product | None
+    product_retry_error: str | None
+    product_attempt: int
+    llm_cost_so_far: float
+    llm_cost_limit: float
+    cost_exceeded: bool
+    model: str | None  # override EXTRACT_MODEL when set (e.g. for testing)
 
 
 def _sanitize_csv_cell(val: str | float | None) -> str:
@@ -50,6 +71,7 @@ class OpenRouterCategoryExtractor(RunnableSerializable[dict, models.Category]):
 
     async def ainvoke(self, input: dict, **kwargs) -> models.Category:
         html = input["html"]
+        model = input.get("model") or self.model
         retry_error = input.get("retry_error")
         user = CATEGORY_USER.format(html=html)
         if retry_error:
@@ -58,12 +80,12 @@ class OpenRouterCategoryExtractor(RunnableSerializable[dict, models.Category]):
             {"role": "system", "content": CATEGORY_SYSTEM},
             {"role": "user", "content": user},
         ]
-        result = await ai_module.responses(
-            self.model,
+        result, cost = await ai_module.responses(
+            model,
             messages,
             text_format=models.Category,
         )
-        return result
+        return (result, cost)
 
 
 class OpenRouterProductExtractor(RunnableSerializable[dict, models.Product]):
@@ -76,6 +98,7 @@ class OpenRouterProductExtractor(RunnableSerializable[dict, models.Product]):
 
     async def ainvoke(self, input: dict, **kwargs) -> models.Product:
         html = input["html"]
+        model = input.get("model") or self.model
         category_name = input["category_name"]
         retry_error = input.get("retry_error")
         user = PRODUCT_USER.format(html=html, category_name=category_name)
@@ -85,16 +108,170 @@ class OpenRouterProductExtractor(RunnableSerializable[dict, models.Product]):
             {"role": "system", "content": PRODUCT_SYSTEM},
             {"role": "user", "content": user},
         ]
-        result = await ai_module.responses(
-            self.model,
+        result, cost = await ai_module.responses(
+            model,
             messages,
             text_format=models.Product,
         )
-        return result
+        return (result, cost)
 
 
 category_runnable = OpenRouterCategoryExtractor()
 product_runnable = OpenRouterProductExtractor()
+
+
+# ---- Graph nodes: each updates shared state (context + retries) ----
+async def _prepare_context(state: ExtractState) -> dict:
+    """Build filtered HTML and initialize retry counters."""
+    soup = BeautifulSoup(state["html_content"], "html.parser")
+    html_filtered = filter_html(soup)
+    return {
+        "html_filtered": html_filtered,
+        "category_attempt": 0,
+        "product_attempt": 0,
+        "llm_cost_so_far": 0.0,
+    }
+
+
+async def _extract_category_node(state: ExtractState) -> dict:
+    """Extract category; on validation error set retry_error and bump attempt. Enforces LLM cost limit."""
+    limit = state.get("llm_cost_limit", LLM_COST_LIMIT_USD)
+    if state.get("llm_cost_so_far", 0) >= limit:
+        return {"cost_exceeded": True}
+
+    inp = {"html": state["html_filtered"], "model": state.get("model") or EXTRACT_MODEL}
+    if state.get("category_retry_error"):
+        inp["retry_error"] = state["category_retry_error"]
+    try:
+        category, cost = await category_runnable.ainvoke(inp)
+        new_total = state.get("llm_cost_so_far", 0) + cost
+        if new_total > limit:
+            return {"llm_cost_so_far": new_total, "cost_exceeded": True}
+        return {"category": category, "category_retry_error": None, "llm_cost_so_far": new_total}
+    except PydanticValidationError as e:
+        attempt = state.get("category_attempt", 0) + 1
+        return {"category_retry_error": str(e), "category_attempt": attempt}
+
+
+async def _extract_product_node(state: ExtractState) -> dict:
+    """Extract product with fixed category; on validation error set retry_error and bump attempt. Enforces LLM cost limit."""
+    limit = state.get("llm_cost_limit", LLM_COST_LIMIT_USD)
+    if state.get("llm_cost_so_far", 0) >= limit:
+        return {"cost_exceeded": True}
+
+    category = state["category"]
+    inp = {"html": state["html_filtered"], "category_name": category.name, "model": state.get("model") or EXTRACT_MODEL}
+    if state.get("product_retry_error"):
+        inp["retry_error"] = state["product_retry_error"]
+    try:
+        product, cost = await product_runnable.ainvoke(inp)
+        new_total = state.get("llm_cost_so_far", 0) + cost
+        if new_total > limit:
+            return {"llm_cost_so_far": new_total, "cost_exceeded": True}
+        return {"product": product, "product_retry_error": None, "llm_cost_so_far": new_total}
+    except PydanticValidationError as e:
+        attempt = state.get("product_attempt", 0) + 1
+        return {"product_retry_error": str(e), "product_attempt": attempt}
+
+
+def _write_output_node(state: ExtractState) -> dict:
+    """Upsert row to CSV if source_filename is set. No state change."""
+    filename = state.get("source_filename")
+    product = state.get("product")
+    if filename and product:
+        _upsert_row(filename, product)
+    return {}
+
+
+def _after_category(state: ExtractState) -> str:
+    """Route: success -> product, retry -> category, max retries -> end, cost exceeded -> end."""
+    if state.get("cost_exceeded"):
+        return "__end__"
+    category = state.get("category")
+    # Check if the category is valid
+    if category is not None:
+        try:
+            # Use the validator to check if the category is valid
+            models.Category.validate_name_exists(category.name)
+            return "extract_product"
+        except ValueError:
+            pass  # name not in categories.txt, retry or end below
+    # If the category is not valid, retry if we haven't exceeded the max retries or end with error
+    if state.get("category_attempt", 0) >= MAX_RETRIES:
+        return "__end__"
+    # If the category is not valid, retry the category extraction
+    return "extract_category"
+
+
+def _after_product(state: ExtractState) -> str:
+    """Route: success -> write_output, retry -> product, max retries -> end, cost exceeded -> end."""
+    if state.get("cost_exceeded"):
+        return "__end__"
+    product = state.get("product")
+    # Check if the product is valid
+    if product is not None:
+        try:
+            # Use the base pydantic model_validate to check if the product is on the schema
+            models.Product.model_validate(product.model_dump())
+            return "write_output"
+        except PydanticValidationError:
+            pass  # schema validation failed, retry or end below
+    # If the product is not valid, retry if we haven't exceeded the max retries or end with error
+    if state.get("product_attempt", 0) >= MAX_RETRIES:
+        return "__end__"
+    # If the product is not valid, retry the product extraction
+    return "extract_product"
+
+
+# Extraction graph (visual):
+#
+#                    START
+#                      │
+#                      ▼
+#              prepare_context
+#                      │
+#                      ▼
+#              extract_category
+#                      │
+#         ┌────────────┼────────────┐
+#         │            │            │
+#         ▼            ▼            ▼
+#  extract_product  extract_category  END
+#  (valid category) (retry category)  (max retries)
+#         │
+#         ▼
+#   extract_product
+#         │
+#    ┌────┼────┐
+#    │    │    │
+#    ▼    ▼    ▼
+# write_output  extract_product  END
+# (valid product) (retry product) (max retries)
+#     │
+#     ▼
+#    END
+#
+_extraction_graph = StateGraph(ExtractState)
+_extraction_graph.add_node("prepare_context", _prepare_context)
+_extraction_graph.add_node("extract_category", _extract_category_node)
+_extraction_graph.add_node("extract_product", _extract_product_node)
+_extraction_graph.add_node("write_output", _write_output_node)
+_extraction_graph.add_edge(START, "prepare_context")
+_extraction_graph.add_edge("prepare_context", "extract_category")
+_extraction_graph.add_conditional_edges("extract_category", _after_category, path_map={
+    "extract_product": "extract_product",
+    "extract_category": "extract_category",
+    "__end__": END,
+})
+_extraction_graph.add_conditional_edges("extract_product", _after_product, path_map={
+    "write_output": "write_output",
+    "extract_product": "extract_product",
+    "__end__": END,
+})
+_extraction_graph.add_edge("write_output", END)
+extraction_graph = _extraction_graph.compile()
+
+
 
 
 def _product_to_csv_row(product: models.Product, filename: str) -> dict:
@@ -147,62 +324,42 @@ def _upsert_row(filename: str, product: models.Product) -> None:
     logger.info("Upserted row for %r to %s", filename, DATA_OUT_PATH)
 
 
-async def extract(html_request: models.ExtractRequest, source_filename: str | None = None):
-    """Extract product data from raw HTML. Two-step flow: category then full product.
+async def extract(html_request: models.ExtractRequest, source_filename: str | None = None, model: str | None = None):
+    """Extract product data from raw HTML via a single LangGraph (context + retries).
     html_request: models.ExtractRequest
     source_filename: if set, upsert result to data_out.csv (overwrite if key exists, else append).
+    model: optional model override (e.g. for testing); default EXTRACT_MODEL.
     """
+    initial: ExtractState = {
+        "html_content": html_request.html_content,
+        "source_filename": source_filename,
+        "llm_cost_limit": LLM_COST_LIMIT_USD,
+    }
+    if model is not None:
+        initial["model"] = model
+    final = await extraction_graph.ainvoke(initial)
 
-    # Shared context: filtered HTML (noise removed)
-    soup = BeautifulSoup(html_request.html_content, "html.parser")
-    logger.info(f"-------------------------------------Starting extraction-------------------------------------")
-    input_for_llm = filter_html(soup)
-    logger.info(f"-------------------------------------Filtered HTML-------------------------------------")
+    if final.get("cost_exceeded"):
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "LLM cost limit exceeded",
+                "limit_usd": final.get("llm_cost_limit", LLM_COST_LIMIT_USD),
+                "spent_usd": final.get("llm_cost_so_far", 0),
+            },
+        )
+    if final.get("category") is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"step": "category", "validation_error": final.get("category_retry_error") or "Max retries exceeded"},
+        )
+    if final.get("product") is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"step": "product", "validation_error": final.get("product_retry_error") or "Max retries exceeded"},
+        )
 
-    # Step 1: Extract category, retry until valid (Google Product Taxonomy)
-    category = None
-    category_retry_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            inp = {"html": input_for_llm}
-            if category_retry_error is not None:
-                inp["retry_error"] = category_retry_error
-            category = await category_runnable.ainvoke(inp)
-            break
-        except PydanticValidationError as e:
-            category_retry_error = str(e)
-            if attempt == MAX_RETRIES - 1:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"step": "category", "validation_error": category_retry_error},
-                )
-    if category is None:
-        raise HTTPException(status_code=422, detail={"step": "category", "validation_error": "Max retries exceeded"})
-
-    # Step 2: Extract full Product with category fixed, retry until valid
-    product = None
-    product_retry_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            inp = {"html": input_for_llm, "category_name": category.name}
-            if product_retry_error is not None:
-                inp["retry_error"] = product_retry_error
-            product = await product_runnable.ainvoke(inp)
-            break
-        except PydanticValidationError as e:
-            product_retry_error = str(e)
-            if attempt == MAX_RETRIES - 1:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"step": "product", "validation_error": product_retry_error},
-                )
-    if product is None:
-        raise HTTPException(status_code=422, detail={"step": "product", "validation_error": "Max retries exceeded"})
-
-    if source_filename is not None:
-        _upsert_row(source_filename, product)
-
-    return {"status": "ok", "product": product.model_dump()}
+    return {"status": "ok", "product": final["product"].model_dump()}
 
 
 
