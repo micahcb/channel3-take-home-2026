@@ -115,3 +115,16 @@ async def responses(
         )
         _log_usage(response)
         return response
+
+
+
+
+
+
+### Usage from given main.py 
+#     response = await ai.responses(
+#         "gpt-5-nano",
+#         [{"role": "system", "content": "You are a helpful assistant that outputs everything in reverse."},
+#          {"role": "user", "content": "Say 'hello world'"}],
+#         text_format=HelloWorldResponse)
+#     logging.info(response.message)

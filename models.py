@@ -30,7 +30,20 @@ class Price(BaseModel):
     # If a product is on sale, this is the original price
     compare_at_price: float | None = None
 
-# This is the final product schema that you need to output. 
+class OptionEntry(BaseModel):
+    """One variant option (e.g. size '9') with availability and optional price."""
+    value: str  # e.g. "9", "9.5", "Red"
+    available: bool = True
+    price: float | None = None  # None = use parent product price
+
+
+class Variant(BaseModel):
+    """Product variant (e.g. Size or Color) with a list of choices."""
+    title: str  # e.g. "Size", "Color"
+    options: list[OptionEntry]  # e.g. [{"value": "9", "available": True, "price": None}, {"value": "9.5", "available": False, "price": 99.5}]
+
+
+# This is the final product schema that you need to output.
 # You may add additional models as needed.
 class Product(BaseModel):
     name: str
@@ -42,4 +55,10 @@ class Product(BaseModel):
     category: Category
     brand: str
     colors: list[str]
-    variants: list[Any] # TODO (@dev): Define variant model
+    variants: list[Variant]
+
+
+class ExtractRequest(BaseModel):
+    html_content: str
+    
+
