@@ -51,9 +51,7 @@ export default function BrandPage() {
   return (
     <div className="min-h-screen bg-background font-sans">
       <main className="mx-auto max-w-5xl px-4 py-12">
-        <Link href="/" className="mb-6 inline-block text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
-          ← Back to products
-        </Link>
+       
         <h1 className="mb-8 text-4xl font-semibold tracking-tight text-foreground">
           {brandName}
         </h1>

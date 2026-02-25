@@ -38,9 +38,7 @@ export default function ProductPage() {
     return (
       <div className="min-h-screen bg-background font-sans">
         <main className="mx-auto max-w-5xl px-4 py-12">
-          <Link href="/" className="mb-6 inline-block text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
-            ← Back to products
-          </Link>
+        
           <ProductCardSkeleton />
         </main>
       </div>
@@ -52,9 +50,7 @@ export default function ProductPage() {
       <div className="min-h-screen bg-background font-sans">
         <main className="mx-auto max-w-5xl px-4 py-12">
           <p className="text-destructive">{error ?? "Product not found."}</p>
-          <Link href="/" className="mt-4 inline-block text-primary underline-offset-4 hover:underline">
-            Back to products
-          </Link>
+          
         </main>
       </div>
     );
@@ -63,9 +59,7 @@ export default function ProductPage() {
   return (
     <div className="min-h-screen bg-background font-sans">
       <main className="mx-auto max-w-5xl px-4 py-12">
-        <Link href="/" className="mb-6 inline-block text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
-          ← Back to products
-        </Link>
+ 
         <ProductCard product={product} />
       </main>
     </div>
