@@ -9,11 +9,16 @@ import { Input } from "@/components/ui/input";
 import { productsUrl } from "@/lib/api";
 import type { Product } from "@/lib/types";
 
+
+// Search filter by name or brand: case-insensitive substring match
 function filterByExactTitleOrBrand(products: Product[], query: string): Product[] {
   const q = query.trim();
   if (!q) return products;
+  const qLower = q.toLowerCase();
   return products.filter(
-    (p) => p.name === q || p.brand === q
+    (p) =>
+      (p.name ?? "").toLowerCase().includes(qLower) ||
+      (p.brand ?? "").toLowerCase().includes(qLower)
   );
 }
 
@@ -103,7 +108,7 @@ export default function Home() {
         {/* No results for search */}
         {!loading && !error && products.length > 0 && filteredProducts.length === 0 && (
           <p className="text-muted-foreground">
-            No products match exactly &quot;{appliedQuery}&quot; (by title or brand).
+            No products match &quot;{appliedQuery}&quot; (by name or brand).
           </p>
         )}
         {/* Products found state */}
