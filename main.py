@@ -2,8 +2,10 @@ import ai
 import argparse
 import asyncio
 import logging
+import re
 from pathlib import Path
 
+from fastapi import HTTPException
 from pydantic import BaseModel
 from scripts.extract import extract
 import models
@@ -48,13 +50,44 @@ if __name__ == "__main__":
         for p in paths:
             # Log the name of the file being processed.
             logging.info("Processing %s", p.name)
-            # Read the content of the file.
-            content = p.read_text(encoding="utf-8", errors="replace")
-            # Run the extract function on the file which parses and saves the data to the data_out.csv file.
-            result = await extract(
-                models.ExtractRequest(html_content=content),
-                source_filename=p.name,
-            )
-            logging.info("Result: %s", result)
+            try:
+                # Read the content of the file.
+                content = p.read_text(encoding="utf-8", errors="replace")
+                # Run the extract function on the file which parses and saves the data to the data_out.csv file.
+                result = await extract(
+                    models.ExtractRequest(html_content=content),
+                    source_filename=p.name,
+                )
+                logging.info("Result: %s", result)
+                
+                logging.info("\n\n")
+                logging.info("-" * 100)
+                logging.info("\n\n")
+
+
+            except HTTPException as e:
+                detail = e.detail if isinstance(e.detail, dict) else {}
+                validation_error = detail.get("validation_error") or str(e.detail)
+                category_match = re.search(
+                    r"Category '([^']+)' is not a valid",
+                    validation_error,
+                )
+                category = category_match.group(1) if category_match else None
+                link = p.resolve().as_posix()
+                logging.error(
+                    "Extraction failed for %s (HTTP %s)\n  Link: %s\n  Category: %s\n  Error: %s",
+                    p.name,
+                    e.status_code,
+                    link,
+                    category or "(unknown)",
+                    validation_error.split("\n")[0] if validation_error else str(detail),
+                )
+            except Exception as e:
+                logging.error(
+                    "Extraction failed for %s: %s",
+                    p.name,
+                    e,
+                    exc_info=True,
+                )
     
     asyncio.run(run())

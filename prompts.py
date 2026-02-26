@@ -60,7 +60,7 @@ Product:
   price: Price (use the provided price model exactly)
   description: str
   key_features: list[str]
-  image_urls: list[str]
+  image_urls: list[str] (FULL URLS)
   video_url: str | None = None
   category: Category  (use the provided category exactly)
   brand: str

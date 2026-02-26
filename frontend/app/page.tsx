@@ -10,7 +10,7 @@ import { productsUrl } from "@/lib/api";
 import type { Product } from "@/lib/types";
 
 
-// Search filter by name or brand: case-insensitive substring match
+// Simple search filter by exact title or brand (will need to be improved, more in README.md writeup)
 function filterByExactTitleOrBrand(products: Product[], query: string): Product[] {
   const q = query.trim();
   if (!q) return products;
